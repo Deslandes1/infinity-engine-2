@@ -1,5 +1,10 @@
 streamlit
 pandas
-plotly
+numpy
+opencv-python
+av
+streamlit-webrtc
+tensorflow
+Pillow
 folium
 streamlit-folium
