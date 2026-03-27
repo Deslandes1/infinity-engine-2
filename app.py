@@ -1,59 +1,715 @@
 import streamlit as st
+import datetime
+import uuid
 import pandas as pd
-import plotly.express as px
+import base64
+import cv2
+import av
+import numpy as np
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+import tensorflow as tf
+from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input, decode_predictions
+from PIL import Image
+import io
 import folium
 from streamlit_folium import folium_static
-import datetime
+import json
 
-st.set_page_config(page_title="Infinity Engine", layout="wide")
+# --- GLOBAL DATABASE ---
+RESOURCE_CLASSES = {
+    "precious": ["gold", "silver", "platinum", "palladium", "rhodium", "diamond", "emerald"],
+    "energy": ["uranium", "thorium", "plutonium", "lithium", "cobalt", "nickel", "petroleum", "gas"],
+    "industrial": ["copper", "iron", "aluminum", "zinc", "bauxite", "titanium", "iridium"],
+    "rare_earth": ["neodymium", "lanthanum", "cerium", "gadolinium", "scandium"]
+}
 
-# Sidebar with branding and license (reuse from radar)
+MARKET_HUB = {
+    "gold": 167290.0, "uranium": 194.45, "iridium": 256230.0, "copper": 12.92,
+    "lithium": 18500.0, "platinum": 34200.0, "silver": 980.0, "thorium": 150.0
+}
+HTG_RATE = 131.19
+MASTER_KEY = "20082010"
+MONCASH_ID = "50947385663"
+
+# --- SESSION STATE ---
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+if 'discovery_log' not in st.session_state:
+    st.session_state.discovery_log = []
+if 'language' not in st.session_state:
+    st.session_state.language = 'en'
+if 'captured_image' not in st.session_state:
+    st.session_state.captured_image = None
+if 'camera_method' not in st.session_state:
+    st.session_state.camera_method = 'camera'
+# New session state for map location
+if 'current_lat' not in st.session_state:
+    st.session_state.current_lat = 18.5  # Haiti approximate center
+if 'current_lon' not in st.session_state:
+    st.session_state.current_lon = -72.3
+if 'use_geolocation' not in st.session_state:
+    st.session_state.use_geolocation = False
+
+# --- TRANSLATIONS (all four languages) ---
+TRANSLATIONS = {
+    'en': {
+        'app_title': 'INFINITY ENGINE v33.0',
+        'app_subtitle': 'Universal Discovery & Humanity Advancement',
+        'owner_collab': 'Owner: <strong>Gesner Deslandes</strong> &nbsp;|&nbsp; Collaborators: Gesner Junior Deslandes, Roosevelt Deslandes, Sebastien Stephane Deslandes & Zendaya Christelle Deslandes',
+        'sidebar_title': '🛡️ Engine Access',
+        'sidebar_activation': 'Activation via MonCash: **{moncash}**',
+        'sidebar_key_label': 'Key:',
+        'sidebar_unlock': 'Unlock Engine',
+        'sidebar_invalid': 'Invalid Key',
+        'sidebar_granted': '✅ ACCESS GRANTED',
+        'sidebar_logout': 'Logout',
+        'welcome_sound_js': """
+            function playBeep() {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                oscillator.type = 'sine';
+                oscillator.frequency.value = 880;
+                gainNode.gain.value = 0.3;
+                oscillator.start();
+                gainNode.gain.exponentialRampToValueAtTime(0.00001, audioContext.currentTime + 0.5);
+                oscillator.stop(audioContext.currentTime + 0.5);
+            }
+            playBeep();
+            const url = new URL(window.location);
+            url.searchParams.delete('play_sound');
+            window.history.replaceState({}, document.title, url.pathname + url.search);
+        """,
+        'main_header': 'INFINITY ENGINE v33.0',
+        'main_subheader': 'Universal Discovery & Humanity Advancement',
+        'scan_subheader': '🔍 Universal Atomic Scan',
+        'camera_method_label': 'How to capture the sample:',
+        'camera_option': '📸 Take photo with camera (reverse button below)',
+        'upload_option': '📁 Upload photo from device',
+        'camera_instruction': '📸 Point the camera at the soil. Use the Reverse button to switch between front and rear cameras.',
+        'upload_instruction': '📸 Take a photo with your device\'s camera and upload it here.',
+        'reverse_button': '↻ Reverse Camera',
+        'capture_button': '📷 Capture Image',
+        'camera_placeholder': 'Camera feed will appear here after granting permission.',
+        'site_label': 'Site Name:',
+        'site_placeholder': 'Grand Goâve',
+        'location_label': '📍 Location (Lat/Lon)',
+        'location_manual': 'Manual coordinates',
+        'location_auto': 'Use my current location',
+        'lat_label': 'Latitude',
+        'lon_label': 'Longitude',
+        'get_location_button': '📍 Get My Location',
+        'photo_label': 'Sample Analysis',
+        'notes_label': 'Analysis Notes (Detected Clues):',
+        'weight_label': 'Mass (kg):',
+        'execute_button': '🚀 EXECUTE UNIVERSAL ANALYSIS',
+        'no_photo_error': 'Please capture or upload an image first.',
+        'report_title': 'SOVEREIGN DISCOVERY REPORT',
+        'resource_label': 'Resource Identified:',
+        'trace_label': 'Scientific Trace:',
+        'value_usd_label': 'Estimated Market Value: ${value:,.2f} USD',
+        'value_htg_label': 'Local Economic Value: {value:,.2f} HTG',
+        'solution_label': 'Humanity Solution:',
+        'solution_text': '{resource} development leads to national infrastructure sovereignty.',
+        'strategic_intel': '🌍 Strategic Intelligence',
+        'recent_log': '**Recent Activity Log:**',
+        'download_button': '📊 Download Research History (CSV)',
+        'no_data_info': 'No discoveries recorded yet. Perform a scan to generate data.',
+        'access_warning': 'Please enter your Master Key in the sidebar to begin scanning.',
+        'language_selector': 'Language / Langue / Lang / Lang',
+        'unknown_mineral': 'Unknown Mineral',
+        'unclassified': 'Unclassified',
+        'map_title': '🗺️ Resource Map',
+        'map_marker_popup': 'Resource: {resource}\nSite: {site}\nValue: ${value:,.2f}',
+    },
+    'fr': {
+        'app_title': 'MOTEUR INFINI v33.0',
+        'app_subtitle': 'Découverte Universelle & Avancement Humain',
+        'owner_collab': 'Propriétaire: <strong>Gesner Deslandes</strong> &nbsp;|&nbsp; Collaborateurs: Gesner Junior Deslandes, Roosevelt Deslandes, Sebastien Stephane Deslandes & Zendaya Christelle Deslandes',
+        'sidebar_title': '🛡️ Accès Moteur',
+        'sidebar_activation': 'Activation via MonCash: **{moncash}**',
+        'sidebar_key_label': 'Clé:',
+        'sidebar_unlock': 'Déverrouiller',
+        'sidebar_invalid': 'Clé invalide',
+        'sidebar_granted': '✅ ACCÈS AUTORISÉ',
+        'sidebar_logout': 'Déconnexion',
+        'welcome_sound_js': """
+            function playBeep() {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                oscillator.type = 'sine';
+                oscillator.frequency.value = 880;
+                gainNode.gain.value = 0.3;
+                oscillator.start();
+                gainNode.gain.exponentialRampToValueAtTime(0.00001, audioContext.currentTime + 0.5);
+                oscillator.stop(audioContext.currentTime + 0.5);
+            }
+            playBeep();
+            const url = new URL(window.location);
+            url.searchParams.delete('play_sound');
+            window.history.replaceState({}, document.title, url.pathname + url.search);
+        """,
+        'main_header': 'MOTEUR INFINI v33.0',
+        'main_subheader': 'Découverte Universelle & Avancement Humain',
+        'scan_subheader': '🔍 Analyse Atomique Universelle',
+        'camera_method_label': 'Comment capturer l\'échantillon:',
+        'camera_option': '📸 Prendre une photo avec l\'appareil (bouton de retournement ci-dessous)',
+        'upload_option': '📁 Télécharger une photo depuis l\'appareil',
+        'camera_instruction': '📸 Pointez l’appareil vers le sol. Utilisez le bouton Retournement pour passer entre caméra avant et arrière.',
+        'upload_instruction': '📸 Prenez une photo avec l\'appareil photo de votre téléphone et téléchargez-la ici.',
+        'reverse_button': '↻ Retourner la caméra',
+        'capture_button': '📷 Capturer l\'image',
+        'camera_placeholder': 'Le flux vidéo apparaîtra ici après autorisation.',
+        'site_label': 'Nom du site:',
+        'site_placeholder': 'Grand Goâve',
+        'location_label': '📍 Emplacement (Lat/Lon)',
+        'location_manual': 'Coordonnées manuelles',
+        'location_auto': 'Utiliser ma position actuelle',
+        'lat_label': 'Latitude',
+        'lon_label': 'Longitude',
+        'get_location_button': '📍 Obtenir ma position',
+        'photo_label': 'Analyse d\'échantillon',
+        'notes_label': 'Notes d\'analyse (indices détectés):',
+        'weight_label': 'Masse (kg):',
+        'execute_button': '🚀 EXÉCUTER L\'ANALYSE UNIVERSELLE',
+        'no_photo_error': 'Veuillez d\'abord capturer ou télécharger une image.',
+        'report_title': 'RAPPORT DE DÉCOUVERTE SOUVERAINE',
+        'resource_label': 'Ressource identifiée:',
+        'trace_label': 'Trace scientifique:',
+        'value_usd_label': 'Valeur marchande estimée: ${value:,.2f} USD',
+        'value_htg_label': 'Valeur économique locale: {value:,.2f} HTG',
+        'solution_label': 'Solution humanitaire:',
+        'solution_text': 'Le développement de {resource} conduit à la souveraineté des infrastructures nationales.',
+        'strategic_intel': '🌍 Renseignement Stratégique',
+        'recent_log': '**Journal d\'activité récent:**',
+        'download_button': '📊 Télécharger l\'historique de recherche (CSV)',
+        'no_data_info': 'Aucune découverte enregistrée pour le moment. Effectuez une analyse pour générer des données.',
+        'access_warning': 'Veuillez entrer votre clé principale dans la barre latérale pour commencer l\'analyse.',
+        'language_selector': 'Langue / Language',
+        'unknown_mineral': 'Minéral Inconnu',
+        'unclassified': 'Non Classifié',
+        'map_title': '🗺️ Carte des ressources',
+        'map_marker_popup': 'Ressource: {resource}\nSite: {site}\nValeur: ${value:,.2f}',
+    },
+    'es': {
+        'app_title': 'MOTOR INFINITO v33.0',
+        'app_subtitle': 'Descubrimiento Universal y Avance Humano',
+        'owner_collab': 'Propietario: <strong>Gesner Deslandes</strong> &nbsp;|&nbsp; Colaboradores: Gesner Junior Deslandes, Roosevelt Deslandes, Sebastien Stephane Deslandes & Zendaya Christelle Deslandes',
+        'sidebar_title': '🛡️ Acceso al Motor',
+        'sidebar_activation': 'Activación vía MonCash: **{moncash}**',
+        'sidebar_key_label': 'Clave:',
+        'sidebar_unlock': 'Desbloquear Motor',
+        'sidebar_invalid': 'Clave inválida',
+        'sidebar_granted': '✅ ACCESO CONCEDIDO',
+        'sidebar_logout': 'Cerrar sesión',
+        'welcome_sound_js': """
+            function playBeep() {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                oscillator.type = 'sine';
+                oscillator.frequency.value = 880;
+                gainNode.gain.value = 0.3;
+                oscillator.start();
+                gainNode.gain.exponentialRampToValueAtTime(0.00001, audioContext.currentTime + 0.5);
+                oscillator.stop(audioContext.currentTime + 0.5);
+            }
+            playBeep();
+            const url = new URL(window.location);
+            url.searchParams.delete('play_sound');
+            window.history.replaceState({}, document.title, url.pathname + url.search);
+        """,
+        'main_header': 'MOTOR INFINITO v33.0',
+        'main_subheader': 'Descubrimiento Universal y Avance Humano',
+        'scan_subheader': '🔍 Escaneo Atómico Universal',
+        'camera_method_label': 'Cómo capturar la muestra:',
+        'camera_option': '📸 Tomar foto con la cámara (botón de volteo abajo)',
+        'upload_option': '📁 Subir foto desde el dispositivo',
+        'camera_instruction': '📸 Apunte la cámara hacia el suelo. Use el botón Voltear para cambiar entre cámara frontal y trasera.',
+        'upload_instruction': '📸 Tome una foto con la cámara de su dispositivo y súbala aquí.',
+        'reverse_button': '↻ Voltear cámara',
+        'capture_button': '📷 Capturar imagen',
+        'camera_placeholder': 'El flujo de la cámara aparecerá aquí después de conceder permiso.',
+        'site_label': 'Nombre del sitio:',
+        'site_placeholder': 'Grand Goâve',
+        'location_label': '📍 Ubicación (Lat/Lon)',
+        'location_manual': 'Coordenadas manuales',
+        'location_auto': 'Usar mi ubicación actual',
+        'lat_label': 'Latitud',
+        'lon_label': 'Longitud',
+        'get_location_button': '📍 Obtener mi ubicación',
+        'photo_label': 'Análisis de muestra',
+        'notes_label': 'Notas de análisis (pistas detectadas):',
+        'weight_label': 'Masa (kg):',
+        'execute_button': '🚀 EJECUTAR ANÁLISIS UNIVERSAL',
+        'no_photo_error': 'Primero capture o suba una imagen.',
+        'report_title': 'INFORME DE DESCUBRIMIENTO SOBERANO',
+        'resource_label': 'Recurso identificado:',
+        'trace_label': 'Traza científica:',
+        'value_usd_label': 'Valor de mercado estimado: ${value:,.2f} USD',
+        'value_htg_label': 'Valor económico local: {value:,.2f} HTG',
+        'solution_label': 'Solución humanitaria:',
+        'solution_text': 'El desarrollo de {resource} conduce a la soberanía de infraestructura nacional.',
+        'strategic_intel': '🌍 Inteligencia Estratégica',
+        'recent_log': '**Registro de actividad reciente:**',
+        'download_button': '📊 Descargar historial de investigación (CSV)',
+        'no_data_info': 'Aún no se han registrado descubrimientos. Realice un escaneo para generar datos.',
+        'access_warning': 'Por favor ingrese su clave maestra en la barra lateral para comenzar el escaneo.',
+        'language_selector': 'Idioma / Language',
+        'unknown_mineral': 'Mineral Desconocido',
+        'unclassified': 'No Clasificado',
+        'map_title': '🗺️ Mapa de recursos',
+        'map_marker_popup': 'Recurso: {resource}\nSitio: {site}\nValor: ${value:,.2f}',
+    },
+    'ht': {
+        'app_title': 'MOTEUR ENFINI v33.0',
+        'app_subtitle': 'Dekouvèt Inivèsèl ak Avansman Imèn',
+        'owner_collab': 'Pwopriyetè: <strong>Gesner Deslandes</strong> &nbsp;|&nbsp; Kolaboratè: Gesner Junior Deslandes, Roosevelt Deslandes, Sebastien Stephane Deslandes & Zendaya Christelle Deslandes',
+        'sidebar_title': '🛡️ Aksè Moteur',
+        'sidebar_activation': 'Aktivasyon atravè MonCash: **{moncash}**',
+        'sidebar_key_label': 'Kle:',
+        'sidebar_unlock': 'Deklannche Moteur',
+        'sidebar_invalid': 'Kle pa bon',
+        'sidebar_granted': '✅ AKSÈ AKÒDE',
+        'sidebar_logout': 'Dekonekte',
+        'welcome_sound_js': """
+            function playBeep() {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                oscillator.type = 'sine';
+                oscillator.frequency.value = 880;
+                gainNode.gain.value = 0.3;
+                oscillator.start();
+                gainNode.gain.exponentialRampToValueAtTime(0.00001, audioContext.currentTime + 0.5);
+                oscillator.stop(audioContext.currentTime + 0.5);
+            }
+            playBeep();
+            const url = new URL(window.location);
+            url.searchParams.delete('play_sound');
+            window.history.replaceState({}, document.title, url.pathname + url.search);
+        """,
+        'main_header': 'MOTEUR ENFINI v33.0',
+        'main_subheader': 'Dekouvèt Inivèsèl ak Avansman Imèn',
+        'scan_subheader': '🔍 Analiz Atomik Inivèsèl',
+        'camera_method_label': 'Ki jan pou pran foto echantiyon an:',
+        'camera_option': '📸 Pran foto ak kamera (bouton vire anba a)',
+        'upload_option': '📁 Telechaje foto depi aparèy ou',
+        'camera_instruction': '📸 Montre kamera ou sou tè a. Sèvi ak bouton Vire pou chanje ant kamera devan ak dèyè.',
+        'upload_instruction': '📸 Pran yon foto ak kamera aparèy ou epi telechaje li isit la.',
+        'reverse_button': '↻ Vire Kamera',
+        'capture_button': '📷 Pran Foto',
+        'camera_placeholder': 'Flò kamera a ap parèt isit la apre w bay pèmisyon.',
+        'site_label': 'Non sit:',
+        'site_placeholder': 'Grand Goâve',
+        'location_label': '📍 Kote (Lat/Lon)',
+        'location_manual': 'Kowòdone manyèl',
+        'location_auto': 'Sèvi ak pozisyon mwen kounye a',
+        'lat_label': 'Latitid',
+        'lon_label': 'Longitid',
+        'get_location_button': '📍 Jwenn pozisyon mwen',
+        'photo_label': 'Analiz echantiyon',
+        'notes_label': 'Nòt analiz (endis detekte):',
+        'weight_label': 'Mas (kg):',
+        'execute_button': '🚀 EKZEKITE ANALIZ INIVÈSÈL',
+        'no_photo_error': 'Tanpri pran yon foto oswa telechaje yon imaj an premye.',
+        'report_title': 'RAPÒ DEKOUVÈT SOUVÈN',
+        'resource_label': 'Rès idantifye:',
+        'trace_label': 'Trase syantifik:',
+        'value_usd_label': 'Valè sou mache estime: ${value:,.2f} USD',
+        'value_htg_label': 'Valè ekonomik lokal: {value:,.2f} HTG',
+        'solution_label': 'Solisyon imanitè:',
+        'solution_text': 'Devlopman {resource} mennen nan souvrenite enfrastrikti nasyonal.',
+        'strategic_intel': '🌍 Entèlijans Estratejik',
+        'recent_log': '**Jounal aktivite resan:**',
+        'download_button': '📊 Telechaje istorik rechèch (CSV)',
+        'no_data_info': 'Pa gen okenn dekouvèt anrejistre ankò. Fè yon eskanè pou jenere done.',
+        'access_warning': 'Tanpri antre kle prensipal ou nan ba a pou kòmanse eskanè.',
+        'language_selector': 'Lang / Language',
+        'unknown_mineral': 'Mineral Enkoni',
+        'unclassified': 'Pa Klase',
+        'map_title': '🗺️ Kat resous',
+        'map_marker_popup': 'Resous: {resource}\nSit: {site}\nValè: ${value:,.2f}',
+    }
+}
+
+def get_text(key, lang=None, **kwargs):
+    if lang is None:
+        lang = st.session_state.language
+    text = TRANSLATIONS.get(lang, TRANSLATIONS['en']).get(key, TRANSLATIONS['en'].get(key, key))
+    if kwargs:
+        return text.format(**kwargs)
+    return text
+
+# --- LOGIC ---
+def analyze_resource(text):
+    text = text.lower()
+    for category, minerals in RESOURCE_CLASSES.items():
+        for m in minerals:
+            if m in text:
+                return m, category
+    return "Unknown Mineral", "Unclassified"
+
+# --- IMAGE CLASSIFICATION MODEL ---
+@st.cache_resource
+def load_model():
+    model = MobileNetV2(weights='imagenet')
+    return model
+
+def classify_image(image_bytes):
+    """
+    Classify an image using MobileNetV2 and map the top prediction to a mineral.
+    image_bytes: bytes of the image (JPEG/PNG)
+    Returns: (mineral_name, confidence, category)
+    """
+    try:
+        model = load_model()
+        img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        img = img.resize((224, 224))
+        img_array = np.array(img)
+        img_array = np.expand_dims(img_array, axis=0)
+        img_array = preprocess_input(img_array)
+
+        preds = model.predict(img_array, verbose=0)
+        decoded = decode_predictions(preds, top=3)[0]  # top 3 predictions
+
+        mapping = {
+            'gold': 'gold', 'silver': 'silver', 'platinum': 'platinum',
+            'copper': 'copper', 'iron': 'iron', 'uranium': 'uranium',
+            'rock': 'rock', 'soil': 'soil', 'sand': 'sand',
+            'diamond': 'diamond', 'emerald': 'emerald'
+        }
+        for label, prob in decoded:
+            label_lower = label.lower()
+            for keyword, mineral in mapping.items():
+                if keyword in label_lower:
+                    for cat, minerals in RESOURCE_CLASSES.items():
+                        if mineral in minerals:
+                            return mineral, prob, cat
+        top_label = decoded[0][1].lower()
+        if 'rock' in top_label or 'stone' in top_label:
+            return "rock", decoded[0][2], "industrial"
+        elif 'soil' in top_label or 'dirt' in top_label:
+            return "soil", decoded[0][2], "industrial"
+        else:
+            return "Unknown Mineral", decoded[0][2], "Unclassified"
+    except Exception as e:
+        st.error(f"Image classification failed: {e}")
+        return "Unknown Mineral", 0, "Unclassified"
+
+# --- Video processor for capturing frames ---
+class VideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.image = None
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        self.image = img
+        return frame
+
+def camera_widget():
+    webrtc_ctx = webrtc_streamer(
+        key="sample-camera",
+        mode=WebRtcMode.SENDRECV,
+        video_processor_factory=VideoProcessor,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+    )
+
+    if webrtc_ctx.video_processor:
+        if st.button(get_text('capture_button'), key="capture_btn"):
+            img = webrtc_ctx.video_processor.image
+            if img is not None:
+                success, buffer = cv2.imencode('.jpg', img)
+                if success:
+                    img_base64 = base64.b64encode(buffer).decode()
+                    st.session_state.captured_image = f"data:image/jpeg;base64,{img_base64}"
+                    st.rerun()
+            else:
+                st.error("No image captured. Please ensure the camera is working.")
+    else:
+        st.info(get_text('camera_placeholder'))
+
+# --- UI CONFIG ---
+st.set_page_config(page_title="Infinity Engine v33.0", layout="centered")
+
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.markdown(get_text('owner_collab'), unsafe_allow_html=True)
+with col2:
+    lang_options = {'en': '🇺🇸 English', 'fr': '🇫🇷 Français', 'es': '🇪🇸 Español', 'ht': '🇭🇹 Kreyòl'}
+    selected_lang = st.selectbox(
+        get_text('language_selector'),
+        options=list(lang_options.keys()),
+        format_func=lambda x: lang_options[x],
+        index=list(lang_options.keys()).index(st.session_state.language)
+    )
+    if selected_lang != st.session_state.language:
+        st.session_state.language = selected_lang
+        st.rerun()
+
+# Simple Haitian flag (blue and red bands only)
+st.markdown("""
+<div style="display: flex; justify-content: center; margin: 20px 0;">
+    <svg width="320" height="192" viewBox="0 0 960 576" xmlns="http://www.w3.org/2000/svg">
+        <rect width="960" height="288" fill="#00209F" />
+        <rect y="288" width="960" height="288" fill="#D21034" />
+    </svg>
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+    <style>
+    .main-header { background: linear-gradient(135deg, #00209F 0%, #D21034 100%); color: white; padding: 25px; border-radius: 15px; text-align: center; border-bottom: 5px solid #FFD700; margin-bottom: 20px; }
+    .report-card { border: 2px solid #00209F; padding: 20px; border-radius: 10px; background: #fff; color: #000; margin-top: 20px; box-shadow: 2px 2px 10px rgba(0,0,0,0.1); }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- SIDEBAR AUTH ---
 with st.sidebar:
-    st.markdown("## 🚀 Infinity Engine")
-    st.markdown("Geological research platform for real-time natural resource mapping and development reporting.")
-    st.markdown("---")
-    st.markdown("### 📜 License")
-    st.markdown("""
-    **Proprietary Commercial Software**  
-    Copyright © 2025 Gesner Deslandes. All rights reserved.
+    st.title(get_text('sidebar_title'))
+    if not st.session_state.authenticated:
+        st.write(get_text('sidebar_activation', moncash=MONCASH_ID))
+        user_key = st.text_input(get_text('sidebar_key_label'), type="password")
+        if st.button(get_text('sidebar_unlock')):
+            if user_key == MASTER_KEY:
+                st.session_state.authenticated = True
+                st.query_params["play_sound"] = "true"
+                st.rerun()
+            else:
+                st.error(get_text('sidebar_invalid'))
+    else:
+        st.success(get_text('sidebar_granted'))
+        if st.button(get_text('sidebar_logout')):
+            st.session_state.authenticated = False
+            st.rerun()
 
-    This software is **licensed**, not sold.  
-    Unauthorized copying, distribution, or resale is prohibited.
-    """)
-    st.markdown("📞 **Prisme Transfer** (Digicel Moncash): `(509) 4738-5663`")
-    st.markdown("📧 **Email**: `deslandes78@gmail.com`")
-    st.caption("© 2025 GlobalInternet.py")
+# --- WELCOME SOUND ---
+if st.session_state.authenticated and st.query_params.get("play_sound") == "true":
+    st.markdown(f"<script>{get_text('welcome_sound_js')}</script>", unsafe_allow_html=True)
 
-st.title("🚀 Infinity Engine")
-st.markdown("Real‑time natural resource mapping and development reporting")
+# --- MAIN INTERFACE ---
+st.markdown(f'<div class="main-header"><h1>{get_text("main_header")}</h1><p>{get_text("main_subheader")}</p></div>', unsafe_allow_html=True)
 
-# Placeholder for map – you can replace with actual geological data
-st.subheader("🗺️ Resource Map (Placeholder)")
+if st.session_state.authenticated:
+    st.subheader(get_text('scan_subheader'))
 
-# Example: create a simple map using folium (you can also use plotly)
-m = folium.Map(location=[18.5, -72.3], zoom_start=7, tiles="OpenStreetMap")
-# Add a marker for a sample resource location
-folium.Marker(
-    [18.5, -72.3],
-    popup="Sample Resource Site",
-    tooltip="Click for info",
-    icon=folium.Icon(color="green", icon="info-sign")
-).add_to(m)
-folium_static(m)
+    method = st.radio(
+        get_text('camera_method_label'),
+        options=['camera', 'upload'],
+        format_func=lambda x: get_text('camera_option') if x == 'camera' else get_text('upload_option'),
+        horizontal=True
+    )
+    st.session_state.camera_method = method
 
-st.subheader("📊 Development Reporting")
+    if method == 'camera':
+        st.markdown(f"<p style='font-size:0.9rem; color:#555;'>{get_text('camera_instruction')}</p>", unsafe_allow_html=True)
+        camera_widget()
+        if st.session_state.captured_image:
+            st.image(st.session_state.captured_image, caption="Captured image", width=200)
+            if st.button("Clear image"):
+                st.session_state.captured_image = None
+                st.rerun()
+    else:
+        st.markdown(f"<p style='font-size:0.9rem; color:#555;'>{get_text('upload_instruction')}</p>", unsafe_allow_html=True)
+        uploaded = st.file_uploader(get_text('photo_label'), type=['jpg', 'jpeg', 'png'])
+        if uploaded:
+            bytes_data = uploaded.read()
+            b64 = base64.b64encode(bytes_data).decode()
+            st.session_state.captured_image = f"data:image/{uploaded.type.split('/')[-1]};base64,{b64}"
+            st.rerun()
 
-# Dummy data – replace with your own data source
-data = pd.DataFrame({
-    "Site": ["Site A", "Site B", "Site C"],
-    "Resource Type": ["Gold", "Copper", "Lithium"],
-    "Estimated Value (USD)": [5e6, 3.2e6, 8.7e6],
-    "Last Update": [datetime.date(2025, 3, 1), datetime.date(2025, 3, 15), datetime.date(2025, 3, 20)]
-})
-st.dataframe(data, use_container_width=True)
+    # Site and location
+    site = st.text_input(get_text('site_label'), get_text('site_placeholder'))
 
-# Simple chart
-fig = px.bar(data, x="Site", y="Estimated Value (USD)", color="Resource Type", title="Resource Estimates")
-st.plotly_chart(fig, use_container_width=True)
+    st.subheader(get_text('location_label'))
+    loc_method = st.radio(
+        "",
+        options=['manual', 'auto'],
+        format_func=lambda x: get_text('location_manual') if x == 'manual' else get_text('location_auto'),
+        horizontal=True,
+        key="loc_method"
+    )
+    if loc_method == 'manual':
+        col_lat, col_lon = st.columns(2)
+        with col_lat:
+            lat = st.number_input(get_text('lat_label'), value=st.session_state.current_lat, format="%.6f")
+        with col_lon:
+            lon = st.number_input(get_text('lon_label'), value=st.session_state.current_lon, format="%.6f")
+        if st.button(get_text('get_location_button'), key="manual_loc"):
+            # In manual mode, just store the numbers
+            st.session_state.current_lat = lat
+            st.session_state.current_lon = lon
+            st.success(f"Location set to {lat:.5f}, {lon:.5f}")
+    else:
+        # Auto geolocation
+        st.markdown("""
+            <script>
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        const lat = position.coords.latitude;
+                        const lon = position.coords.longitude;
+                        const url = new URL(window.location.href);
+                        url.searchParams.set('lat', lat);
+                        url.searchParams.set('lon', lon);
+                        window.location.href = url.href;
+                    },
+                    (error) => {
+                        alert("Geolocation error: " + error.message);
+                    }
+                );
+            } else {
+                alert("Geolocation is not supported by your browser.");
+            }
+            </script>
+        """, unsafe_allow_html=True)
+        # Check for URL parameters from geolocation
+        query_params = st.query_params
+        lat_param = query_params.get("lat")
+        lon_param = query_params.get("lon")
+        if lat_param is not None and lon_param is not None:
+            try:
+                st.session_state.current_lat = float(lat_param)
+                st.session_state.current_lon = float(lon_param)
+                st.success(f"📍 Location acquired: {st.session_state.current_lat:.5f}, {st.session_state.current_lon:.5f}")
+                # Remove parameters to avoid infinite loop
+                st.query_params.clear()
+            except:
+                pass
+        # Show current stored location
+        st.write(f"Current location: **{st.session_state.current_lat:.5f}, {st.session_state.current_lon:.5f}**")
+        if st.button(get_text('get_location_button'), key="auto_loc"):
+            # Trigger JavaScript again
+            st.experimental_rerun()
+        lat = st.session_state.current_lat
+        lon = st.session_state.current_lon
 
-st.info("This is a demonstration. Replace with your own geological data and mapping logic.")
+    notes = st.text_area(get_text('notes_label'))
+    weight = st.number_input(get_text('weight_label'), value=1.0)
+
+    if st.button(get_text('execute_button')):
+        if st.session_state.captured_image:
+            # Extract image bytes
+            img_data = st.session_state.captured_image
+            if img_data.startswith('data:image'):
+                img_base64 = img_data.split(',')[1]
+                img_bytes = base64.b64decode(img_base64)
+            else:
+                img_bytes = img_data.encode()
+
+            # Classify image
+            with st.spinner("Analyzing sample with AI..."):
+                mineral_name, confidence, category = classify_image(img_bytes)
+
+            # Optionally combine with notes if confidence low
+            if confidence < 0.5 and notes.strip():
+                notes_res, notes_cat = analyze_resource(notes)
+                if notes_res != "Unknown Mineral":
+                    mineral_name = notes_res
+                    category = notes_cat
+
+            price = MARKET_HUB.get(mineral_name, 0)
+            usd_val = price * weight
+            htg_val = usd_val * HTG_RATE
+            rep_id = f"HSC-UNIV-{uuid.uuid4().hex[:6].upper()}"
+
+            st.session_state.discovery_log.append({
+                "Date": str(datetime.date.today()),
+                "ID": rep_id,
+                "Resource": mineral_name.upper(),
+                "Category": category.upper(),
+                "Site": site,
+                "Latitude": lat,
+                "Longitude": lon,
+                "Mass_kg": weight,
+                "Value_USD": usd_val,
+                "AI_Confidence": f"{confidence:.2f}"
+            })
+
+            resource_display = mineral_name.upper() if mineral_name != "Unknown Mineral" else get_text('unknown_mineral')
+            category_display = category.upper() if category != "Unclassified" else get_text('unclassified')
+
+            report_html = f"""
+            <div class="report-card">
+                <h2 style="color:#D21034; text-align:center;">{get_text('report_title')}</h2>
+                <hr>
+                <p><b>{get_text('resource_label')}</b> {resource_display} ({category_display})</p>
+                <p><b>AI Analysis Confidence:</b> {confidence:.2%}</p>
+                <p><b>{get_text('trace_label')}</b> Atomic structure match verified via AI visual recognition.</p>
+                <h3 style="color:green;">{get_text('value_usd_label', value=usd_val)}</h3>
+                <h3 style="color:#00209F;">{get_text('value_htg_label', value=htg_val)}</h3>
+                <hr>
+                <p><b>{get_text('solution_label')}</b> {get_text('solution_text', resource=mineral_name.capitalize())}</p>
+            </div>
+            """
+            st.markdown(report_html, unsafe_allow_html=True)
+        else:
+            st.error(get_text('no_photo_error'))
+
+    # --- MAP SECTION ---
+    st.divider()
+    st.subheader(get_text('map_title'))
+    if st.session_state.discovery_log:
+        # Create a DataFrame of discoveries with coordinates
+        df_map = pd.DataFrame(st.session_state.discovery_log)
+        # Filter out entries without valid coordinates
+        df_map = df_map.dropna(subset=['Latitude', 'Longitude'])
+        if not df_map.empty:
+            # Create a base map centered on the mean of all points or last location
+            center_lat = df_map['Latitude'].mean()
+            center_lon = df_map['Longitude'].mean()
+            m = folium.Map(location=[center_lat, center_lon], zoom_start=6, tiles="OpenStreetMap")
+            # Define colors for categories
+            category_colors = {
+                "PRECIOUS": "gold",
+                "ENERGY": "darkgreen",
+                "INDUSTRIAL": "gray",
+                "RARE_EARTH": "purple",
+                "UNCLASSIFIED": "lightgray"
+            }
+            for _, row in df_map.iterrows():
+                resource = row['Resource']
+                site = row['Site']
+                value = row['Value_USD']
+                cat = row['Category']
+                color = category_colors.get(cat, "blue")
+                popup_text = get_text('map_marker_popup', resource=resource, site=site, value=value)
+                folium.Marker(
+                    location=[row['Latitude'], row['Longitude']],
+                    popup=popup_text,
+                    icon=folium.Icon(color=color, icon="info-sign")
+                ).add_to(m)
+            folium_static(m, width=700, height=500)
+        else:
+            st.info("No discoveries with location data yet. Add coordinates to see them on the map.")
+    else:
+        st.info(get_text('no_data_info'))
+
+    # --- HISTORY SECTION ---
+    st.divider()
+    st.subheader(get_text('strategic_intel'))
+    if st.session_state.discovery_log:
+        st.markdown(get_text('recent_log'))
+        df = pd.DataFrame(st.session_state.discovery_log)
+        st.dataframe(df.tail(5), width='stretch')
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label=get_text('download_button'),
+            data=csv,
+            file_name=f"Infinity_Research_Report_{datetime.date.today()}.csv",
+            mime='text/csv',
+        ) 
+    else:
+        st.info(get_text('no_data_info'))
+else:
+    st.warning(get_text('access_warning'))
